@@ -164,5 +164,4 @@ cython_debug/
 #.idea/
 cs336_basics/
 !cs336-basics/cs336_basics/
-result.nsys-rep
 result.qdstrm
