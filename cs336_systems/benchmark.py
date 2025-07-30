@@ -119,5 +119,5 @@ if __name__ == '__main__':
             device=device
         )
 
-# uv run nsys profile -o result --force-overwrite true --cuda-memory-usage=true python cs336_systems/benchmark.py
+# uv run nsys profile -o result --force-overwrite true python cs336_systems/benchmark.py
 # \\wsl$\Ubuntu-22.04
