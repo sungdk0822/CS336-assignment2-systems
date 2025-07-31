@@ -2,6 +2,7 @@ import cs336_basics
 import torch
 import torch.cuda.nvtx as nvtx
 import timeit
+from contextlib import nullcontext
 from cs336_basics.transformer_language_model import TransformerLanguageModel, softmax
 from cs336_basics.trainer import AdamW, TransformerLanguageModelConfig, cross_entropy
 from torch import inf
@@ -68,6 +69,9 @@ def benchmark_pass(
         if step < warmup_steps:
             measure()
 
+        if step == warmup_steps:
+            torch.cuda.memory._record_memory_history(max_entries=1000000)
+
         if step >= warmup_steps:
             torch.cuda.cudart().cudaProfilerStart()
 
@@ -80,6 +84,13 @@ def benchmark_pass(
             nvtx.range_pop()
 
             measured_times.append(end_time - start_time)
+
+    '''
+        This will output a file memory_snapshot.pickle that you can load into the following online tool:
+        https://pytorch.org/memory_viz
+    '''
+    torch.cuda.memory._dump_snapshot('memory_snapshot.pickle')
+    torch.cuda.memory._record_memory_history(enabled=None)
 
     avg_time = sum(measured_times) / len(measured_times)
 
@@ -125,53 +136,57 @@ if __name__ == '__main__':
     cs336_basics.transformer_language_model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
 
     model_sizes = {
-        'small': {
-            'd_model': 768,
-            'd_ff': 3072,
-            'num_layers': 12,
-            'num_heads': 12
-        },
-        'medium': {
-            'd_model': 1024,
-            'd_ff': 4096,
-            'num_layers': 24,
-            'num_heads': 16
-        },
-        'large': {
-            'd_model': 1280,
-            'd_ff': 5120,
-            'num_layers': 36,
-            'num_heads': 20
-        },
+        # 'small': {
+        #     'd_model': 768,
+        #     'd_ff': 3072,
+        #     'num_layers': 12,
+        #     'num_heads': 12
+        # },
+        # 'medium': {
+        #     'd_model': 1024,
+        #     'd_ff': 4096,
+        #     'num_layers': 24,
+        #     'num_heads': 16
+        # },
+        # 'large': {
+        #     'd_model': 1280,
+        #     'd_ff': 5120,
+        #     'num_layers': 36,
+        #     'num_heads': 20
+        # },
         # 'xl': {
         #     'd_model': 1600,
         #     'd_ff': 6400,
         #     'num_layers': 48,
         #     'num_heads': 25
         # },
-        # '2.7B': {
-        #     'd_model': 2560,
-        #     'd_ff': 10240,
-        #     'num_layers': 32,
-        #     'num_heads': 32
-        # },
+        '2.7B': {
+            'd_model': 2560,
+            'd_ff': 10240,
+            'num_layers': 32,
+            'num_heads': 32
+        },
     }
 
-    context_length = 512
+    context_length = 256
     warmup_steps = 5
     forward_pass_only = False
     do_compile = False
+    use_autocast = True
+    mixed_precision_dtype = torch.bfloat16
+    context = torch.autocast(device_type=device, dtype=mixed_precision_dtype) if use_autocast else nullcontext()
 
     for key, value in model_sizes.items():
         print(key)
-        benchmark_pass(
-            **value, 
-            context_length=context_length,
-            warmup_steps=warmup_steps, 
-            forward_pass_only=forward_pass_only,
-            do_compile=do_compile,
-            device=device
-        )
+        with context:
+            benchmark_pass(
+                **value, 
+                context_length=context_length,
+                warmup_steps=warmup_steps, 
+                forward_pass_only=forward_pass_only,
+                do_compile=do_compile,
+                device=device
+            )
 
 # uv run nsys profile -o result --force-overwrite true python cs336_systems/benchmark.py
 # \\wsl$\Ubuntu-22.04
