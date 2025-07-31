@@ -1,8 +1,10 @@
+import cs336_basics
 import torch
 import torch.cuda.nvtx as nvtx
 import timeit
-from cs336_basics.transformer_language_model import TransformerLanguageModel
-from cs336_basics.trainer import TransformerLanguageModelConfig, cross_entropy
+from cs336_basics.transformer_language_model import TransformerLanguageModel, softmax
+from cs336_basics.trainer import AdamW, TransformerLanguageModelConfig, cross_entropy
+from torch import inf
 
 
 def benchmark_pass(
@@ -15,6 +17,7 @@ def benchmark_pass(
     measurement_steps: int = 10,
     forward_pass_only: bool = False,
     do_compile: bool = False,
+    do_synchronize: bool = True,
     device: str = 'cuda'
 ) -> None:
     batch_size = 4
@@ -30,6 +33,10 @@ def benchmark_pass(
             device=device
         ).get_config()
     )
+
+    lr = 1e-3
+    optimizer = AdamW(model.parameters(), lr)
+
     if do_compile:
         model = torch.compile(model)
 
@@ -43,20 +50,27 @@ def benchmark_pass(
             if not forward_pass_only:
                 loss = cross_entropy(lm_head_output, random_label_ids)
                 loss.backward()
-
+                optimizer.step()
         torch.cuda.synchronize()
 
     @nvtx.range('measure')
     def measure():
         with nvtx.range('forward pass'):
             lm_head_output = model.forward(random_input_ids)   
+            if do_synchronize:
+                torch.cuda.synchronize()
+
         if not forward_pass_only:
-            torch.cuda.synchronize()
             with nvtx.range('backward pass'):
                 loss = cross_entropy(lm_head_output, random_label_ids)
                 loss.backward()
-        
-        torch.cuda.synchronize()
+                if do_synchronize:
+                    torch.cuda.synchronize()
+
+            with nvtx.range('optimizer step'):
+                optimizer.step()
+                if do_synchronize:
+                    torch.cuda.synchronize()
 
     result = timeit.timeit(
         stmt=measure,
@@ -68,9 +82,40 @@ def benchmark_pass(
     print(f'{result / measurement_steps:.4f}')
 
 
+@nvtx.range('scaled dot product attention')
+def annotated_scaled_dot_product_attention(
+    queries: torch.Tensor, 
+    keys: torch.Tensor, 
+    values: torch.Tensor, 
+    mask: torch.Tensor | None = None
+) -> torch.Tensor:
+    '''
+    queries: (batch_size, ..., n, d_k)
+    keys: (batch_size, ..., m, d_k)
+    values: (batch_size, ..., m, d_v)
+    mask: (n, m)
+    '''
+    d_k = queries.shape[-1]
+    with nvtx.range('computing attention scores'):
+        pre_softmax = queries @ keys.transpose(-2, -1) / d_k ** 0.5 # (batch_size, ..., n, m)
+        if mask is not None:
+            pre_softmax.masked_fill_(~mask, -inf) # (batch_size, ..., n, m)
+
+    with nvtx.range('computing softmax'):
+        post_softmax = softmax(pre_softmax, dim=-1) # (batch_size, ..., n, m)
+
+    with nvtx.range('final matmul'):
+        result = post_softmax @ values # (batch_size, ..., n, d_v)
+
+    return result
+
+
 if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'using {device} device')
+
+    # You can swap your original implementation with the annotated version in your benchmarking script via:
+    cs336_basics.transformer_language_model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
 
     model_sizes = {
         'small': {
@@ -108,6 +153,7 @@ if __name__ == '__main__':
     warmup_steps = 5
     forward_pass_only = False
     do_compile = False
+    do_synchronize = False
 
     for key, value in model_sizes.items():
         print(key)
@@ -116,6 +162,7 @@ if __name__ == '__main__':
             warmup_steps=warmup_steps, 
             forward_pass_only=forward_pass_only,
             do_compile=do_compile,
+            do_synchronize=do_synchronize,
             device=device
         )
 
