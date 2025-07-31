@@ -164,4 +164,6 @@ cython_debug/
 #.idea/
 cs336_basics/
 !cs336-basics/cs336_basics/
-result.qdstrm
+cs336_systems/memo.py
+*.qdstrm
+*.sqlite
