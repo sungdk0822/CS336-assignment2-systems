@@ -157,6 +157,7 @@ if __name__ == '__main__':
         # },
     }
 
+    context_length = 512
     warmup_steps = 5
     forward_pass_only = False
     do_compile = False
@@ -165,6 +166,7 @@ if __name__ == '__main__':
         print(key)
         benchmark_pass(
             **value, 
+            context_length=context_length,
             warmup_steps=warmup_steps, 
             forward_pass_only=forward_pass_only,
             do_compile=do_compile,
