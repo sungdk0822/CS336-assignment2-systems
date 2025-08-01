@@ -291,7 +291,35 @@ def run_benchmark_attention(
     df = pd.DataFrame(results)
     pivot_df = df.pivot(index='d_model', columns='seq_len', values='avg_time')
     print(pivot_df)
+    '''
+        benchmark results on A100:
+            forward_pass_only=False
+            do_compile=False
+                seq_len     256       1024      4096      8192      16384
+                d_model                                                  
+                16       0.003059  0.002463  0.022000  0.081238  0.325173
+                32       0.002087  0.002555  0.022442  0.083447  0.333559
+                64       0.002075  0.002441  0.023391  0.087596  0.349094
+                128      0.002068  0.002496  0.025365  0.095230  0.378991
 
+            forward_pass_only=True
+            do_compile=False
+                seq_len     256       1024      4096      8192      16384
+                d_model                                                  
+                16       0.000943  0.000567  0.006108  0.022698  0.090291
+                32       0.000240  0.000532  0.006332  0.023609  0.093935
+                64       0.000242  0.000562  0.006788  0.025441  0.101489
+                128      0.000241  0.000622  0.007653  0.029206  0.116211
+
+            forward_pass_only=True
+            do_compile=True
+                seq_len     256       1024      4096      8192      16384
+                d_model                                                  
+                16       0.000238  0.000481  0.003631  0.013679  0.052226
+                32       0.000335  0.000448  0.004353  0.015626  0.056281
+                64       0.000306  0.000673  0.004820  0.016214  0.063881
+                128      0.000303  0.000733  0.005683  0.020036  0.078846
+    '''
 
 if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -299,7 +327,7 @@ if __name__ == '__main__':
 
     run_benchmark_attention(
         forward_pass_only=True,
-        do_compile=False
+        do_compile=True
     )
 
 
