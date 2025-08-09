@@ -40,15 +40,15 @@ def flash_fwd_kernel(
         K_ptr + batch_index * stride_kb,
         shape=(N_KEYS, D),
         strides=(stride_kk, stride_kd),
-        offsets=(query_tile_index * K_TILE_SIZE, 0),
+        offsets=(0, 0),
         block_shape=(K_TILE_SIZE, D),
         order=(1, 0),
     )
     V_block_ptr = tl.make_block_ptr(
         V_ptr + batch_index * stride_vb,
-        shape=(N_QUERIES, D),
+        shape=(N_KEYS, D),
         strides=(stride_vk, stride_vd),
-        offsets=(query_tile_index * K_TILE_SIZE, 0),
+        offsets=(0, 0),
         block_shape=(K_TILE_SIZE, D),
         order=(1, 0),
     )
@@ -85,7 +85,7 @@ def flash_fwd_kernel(
         V_j = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option='zero')
 
         # S_i_j = Q_i @ K_j.transpose(-2, -1) / d ** 0.5 # (batch_size, B_q, B_k)
-        S_i_j = tl.dot(Q_i, K_j.trans(1, 0)) * scale # 1, 0 맞나?
+        S_i_j = tl.dot(Q_i, K_j.trans(1, 0)) * scale
 
         # m_i_j_pre = m_i_j.detach().clone() # m_i_j_pre is m_i_(j-1)
         m_i_j_pre = m_i_j
@@ -102,14 +102,17 @@ def flash_fwd_kernel(
         l_i_j = tl.exp(m_i_j_pre - m_i_j) * l_i_j + tl.sum(P_hat_i_j, axis=-1)
 
         # O_i_j = torch.diag_embed(tl.exp(m_i_j_pre - m_i_j)) @ O_i_j + P_hat_i_j @ V_j # (batch_size, B_q, d)
-        O_i_j = tl.dot(tl.exp(m_i_j_pre - m_i_j)[None, :].broadcast_to(Q_TILE_SIZE, Q_TILE_SIZE), O_i_j) + tl.dot(P_hat_i_j, V_j) # (batch_size, B_q, d)
+        O_i_j = tl.exp(m_i_j_pre - m_i_j)[:, None] * O_i_j + tl.dot(P_hat_i_j, V_j)
+
+        K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
+        V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
 
     O_i = tl.zeros((Q_TILE_SIZE, D), dtype=tl.float32)
     L_i = tl.zeros((Q_TILE_SIZE,), dtype=tl.float32)
 
     # O_i = torch.inverse(torch.diag_embed(l_i_j)) @ O_i_j # (batch_size, B_q, d)
-    inverse = tl.div_rn(tl.full((Q_TILE_SIZE,), 1.0, dtype=tl.float32), l_i_j)[None, :].broadcast_to(Q_TILE_SIZE, Q_TILE_SIZE)
-    O_i = tl.dot(inverse, O_i_j)
+    inverse = tl.div_rn(tl.full((Q_TILE_SIZE,), 1.0, dtype=tl.float32), l_i_j)[:, None].broadcast_to(Q_TILE_SIZE, D)
+    O_i = inverse * O_i_j
     
     # L_i = m_i_j + torch.log(l_i_j) # (batch_size, B_q)
     L_i = m_i_j + tl.log(l_i_j)
@@ -205,10 +208,10 @@ class FlashAttention2_PyTorch(torch.autograd.Function):
         d = Q.shape[-1]
         N_q = Q.shape[-2]
         N_k = K.shape[-2]
-        # B_q = 16
-        # B_k = 16
-        B_q = 2
-        B_k = 2
+        B_q = 16
+        B_k = 16
+        # B_q = 2
+        # B_k = 2
         T_q = (N_q + B_q - 1) // B_q # cdiv
         T_k = (N_k + B_k - 1) // B_k # cdiv
         
@@ -216,21 +219,21 @@ class FlashAttention2_PyTorch(torch.autograd.Function):
         # naive attention for comparing O values
         naive_S = Q @ K.transpose(-2, -1) / d ** 0.5 # (batch_size, N_q, N_k)
         if is_causal:
-            mask = torch.tril(torch.ones(N_q, N_k)).bool()
+            mask = torch.tril(torch.ones(N_q, N_k)).bool().cuda()
             naive_S.masked_fill_(~mask, -inf) # (batch_size, N_q, N_k)
         naive_P = softmax(naive_S, dim=-1) # (batch_size, N_q, N_k)
         naive_O = naive_P @ V # (batch_size, N_q, d)
 
 
         # pytorch version FA2 (not triton)
-        O = torch.empty(batch_size, N_q, d)
-        L = torch.empty(batch_size, N_q)
+        O = torch.empty(batch_size, N_q, d, device='cuda')
+        L = torch.empty(batch_size, N_q, device='cuda')
 
         for i in range(1, T_q + 1):
             Q_i = Q[:, (i - 1) * B_q : i * B_q, :] # (batch_size, B_q, d)
-            O_i_j = torch.zeros(batch_size, B_q, d)
-            l_i_j = torch.zeros(batch_size, B_q)
-            m_i_j = torch.full((batch_size, B_q), -inf)
+            O_i_j = torch.zeros(batch_size, B_q, d, device='cuda')
+            l_i_j = torch.zeros(batch_size, B_q, device='cuda')
+            m_i_j = torch.full((batch_size, B_q), -inf, device='cuda')
             for j in range(1, T_k + 1):
                 K_j = K[:, (j - 1) * B_k : j * B_k, :] # (batch_size, B_k, d)
                 V_j = V[:, (j - 1) * B_k : j * B_k, :] # (batch_size, B_k, d)
@@ -260,15 +263,13 @@ class FlashAttention2_PyTorch(torch.autograd.Function):
 
 
 if __name__ == '__main__':
-    batch_size = 1
-    N_q = 4
-    N_k = 4
-    d = 4
-    # Q = torch.randn(batch_size, N_q, d)
-    # K = torch.randn(batch_size, N_k, d)
-    # V = torch.randn(batch_size, N_k, d)
-    Q = torch.arange(batch_size * N_q * d, dtype=torch.float).reshape(batch_size, N_q, d)
-    K = torch.arange(batch_size * N_q * d, batch_size * N_q * d + batch_size * N_k * d, dtype=torch.float).reshape(batch_size, N_k, d)
-    V = torch.arange(batch_size * N_q * d + batch_size * N_k * d, batch_size * N_q * d + 2 * batch_size * N_k * d, dtype=torch.float).reshape(batch_size, N_k, d)
+    batch_size = 16
+    N_q = 32
+    N_k = 32
+    d = 16
+    Q = torch.arange(batch_size * N_q * d, dtype=torch.float).reshape(batch_size, N_q, d).cuda()
+    K = torch.arange(batch_size * N_q * d, batch_size * N_q * d + batch_size * N_k * d, dtype=torch.float).reshape(batch_size, N_k, d).cuda()
+    V = torch.arange(batch_size * N_q * d + batch_size * N_k * d, batch_size * N_q * d + 2 * batch_size * N_k * d, dtype=torch.float).reshape(batch_size, N_k, d).cuda()
 
-    O = FlashAttention2_PyTorch.forward(nullcontext, Q, K, V)
+    torch_O = (FlashAttention2_PyTorch.apply)(Q, K, V)
+    triton_O = (FlashAttention2.apply)(Q, K, V)
