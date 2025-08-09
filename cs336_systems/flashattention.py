@@ -215,6 +215,12 @@ class FlashAttention2_PyTorch(torch.autograd.Function):
         assert len(K.shape) == 3
         assert len(V.shape) == 3
 
+        # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cpu')
+        Q = Q.to(device)
+        K = K.to(device)
+        V = V.to(device)
+
         batch_size = Q.shape[0]
         d = Q.shape[-1]
         N_q = Q.shape[-2]
@@ -237,14 +243,14 @@ class FlashAttention2_PyTorch(torch.autograd.Function):
 
 
         # pytorch version FA2 (not triton)
-        O = torch.empty(batch_size, N_q, d, device='cuda')
-        L = torch.empty(batch_size, N_q, device='cuda')
+        O = torch.empty(batch_size, N_q, d, device=device)
+        L = torch.empty(batch_size, N_q, device=device)
 
         for i in range(1, T_q + 1):
             Q_i = Q[:, (i - 1) * B_q : i * B_q, :] # (batch_size, B_q, d)
-            O_i_j = torch.zeros(batch_size, B_q, d, device='cuda')
-            l_i_j = torch.zeros(batch_size, B_q, device='cuda')
-            m_i_j = torch.full((batch_size, B_q), -inf, device='cuda')
+            O_i_j = torch.zeros(batch_size, B_q, d, device=device)
+            l_i_j = torch.zeros(batch_size, B_q, device=device)
+            m_i_j = torch.full((batch_size, B_q), -inf, device=device)
             for j in range(1, T_k + 1):
                 K_j = K[:, (j - 1) * B_k : j * B_k, :] # (batch_size, B_k, d)
                 V_j = V[:, (j - 1) * B_k : j * B_k, :] # (batch_size, B_k, d)
@@ -264,13 +270,68 @@ class FlashAttention2_PyTorch(torch.autograd.Function):
             L[:, (i - 1) * B_q : i * B_q] = L_i
 
         # assert torch.allclose(O, naive_O)
-        ctx.save_for_backward(L)
+        ctx.save_for_backward(Q, K, V, O, L)
+        ctx.N_q = N_q
+        ctx.N_k = N_k
+        ctx.B_q = B_q
+        ctx.B_k = B_k
+        ctx.T_q = T_q
+        ctx.T_k = T_k
 
         return O
 
+    # uv run pytest -k test_flash_backward
     @staticmethod
-    def backward(ctx, grad_out):
-        raise NotImplementedError
+    def backward(ctx, dO):
+        '''
+        Q: (batch_size, N_q, d)
+        K: (batch_size, N_k, d)
+        V: (batch_size, N_k, d)
+        '''
+        Q, K, V, O, L = ctx.saved_tensors
+        N_q = ctx.N_q
+        N_k = ctx.N_k
+        B_q = ctx.B_q
+        B_k = ctx.B_k
+        T_q = ctx.T_q
+        T_k = ctx.T_k
+
+        # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        device = torch.device('cpu')
+
+        batch_size = Q.shape[0]
+        d = Q.shape[-1]
+
+        S = Q @ K.transpose(-2, -1) / d ** 0.5
+
+        # P = torch.empty(batch_size, N_q, N_k, device=device)
+        # for i in range(1, T_q + 1):
+        #     for j in range(1, T_k + 1):
+        #         S_i_j = S[:, (i - 1) * B_q : i * B_q, (j - 1) * B_k : j * B_k]
+        #         L_i = L[:, (i - 1) * B_q : i * B_q]
+        #         P[:, (i - 1) * B_q : i * B_q, (j - 1) * B_k : j * B_k] = torch.exp(S_i_j - L_i.unsqueeze(-1))
+        P = torch.exp(S - L.unsqueeze(-1))
+
+        dV = P.transpose(-2, -1) @ dO
+
+        dP = dO @ V.transpose(-2, -1)
+
+        D = torch.sum(O * dO, dim=-1)
+
+        # dS = torch.empty(batch_size, N_q, N_k, device=device)
+        # for i in range(1, T_q + 1):
+        #     for j in range(1, T_k + 1):
+        #         P_ij = P[:, (i - 1) * B_q : i * B_q, (j - 1) * B_k : j * B_k]
+        #         dP_ij = dP[:, (i - 1) * B_q : i * B_q, (j - 1) * B_k : j * B_k]
+        #         D_i = D[:, (i - 1) * B_q : i * B_q]
+        #         dS[:, (i - 1) * B_q : i * B_q, (j - 1) * B_k : j * B_k] = P_ij * (dP_ij - D_i.unsqueeze(-1))
+        dS = P * (dP - D.unsqueeze(-1))
+        
+        dQ = dS @ K / d ** 0.5
+
+        dK = dS.transpose(-2, -1) @ Q / d ** 0.5
+
+        return dQ, dK, dV, None
 
 
 if __name__ == '__main__':
