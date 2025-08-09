@@ -21,6 +21,7 @@ def flash_fwd_kernel(
     D: tl.constexpr,
     Q_TILE_SIZE: tl.constexpr, # B_q
     K_TILE_SIZE: tl.constexpr, # B_k
+    is_causal: tl.constexpr
 ):
     # Program indices
     query_tile_index = tl.program_id(0)
@@ -86,6 +87,15 @@ def flash_fwd_kernel(
 
         # S_i_j = Q_i @ K_j.transpose(-2, -1) / d ** 0.5 # (batch_size, B_q, B_k)
         S_i_j = tl.dot(Q_i, K_j.trans(1, 0)) * scale
+
+        if is_causal:
+            Q_indices = tl.arange(0, Q_TILE_SIZE)[:, None].broadcast_to(Q_TILE_SIZE, K_TILE_SIZE)
+            Q_indices += query_tile_index * Q_TILE_SIZE
+            K_indices = tl.arange(0, K_TILE_SIZE)[None, :].broadcast_to(Q_TILE_SIZE, K_TILE_SIZE)
+            K_indices += (j - 1) * K_TILE_SIZE
+            causal_mask = tl.where(Q_indices >= K_indices, 0, 1)
+            causal_mask *= -1e6
+            S_i_j += causal_mask
 
         # m_i_j_pre = m_i_j.detach().clone() # m_i_j_pre is m_i_(j-1)
         m_i_j_pre = m_i_j
@@ -161,7 +171,8 @@ class FlashAttention2(torch.autograd.Function):
             1 / ctx.d ** 0.5,
             ctx.d,
             ctx.B_q,
-            ctx.B_k
+            ctx.B_k,
+            is_causal
         )
 
         ctx.save_for_backward(L)
@@ -266,10 +277,10 @@ if __name__ == '__main__':
     batch_size = 16
     N_q = 32
     N_k = 32
-    d = 16
+    d = 64
     Q = torch.arange(batch_size * N_q * d, dtype=torch.float).reshape(batch_size, N_q, d).cuda()
     K = torch.arange(batch_size * N_q * d, batch_size * N_q * d + batch_size * N_k * d, dtype=torch.float).reshape(batch_size, N_k, d).cuda()
     V = torch.arange(batch_size * N_q * d + batch_size * N_k * d, batch_size * N_q * d + 2 * batch_size * N_k * d, dtype=torch.float).reshape(batch_size, N_k, d).cuda()
 
     torch_O = (FlashAttention2_PyTorch.apply)(Q, K, V)
-    triton_O = (FlashAttention2.apply)(Q, K, V)
+    triton_O = (FlashAttention2.apply)(Q, K, V, True)
