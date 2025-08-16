@@ -1,8 +1,10 @@
 import os
 import timeit
+from turtle import forward
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
+from torch import nn
 from typing import Literal
 
 
@@ -61,6 +63,25 @@ def benchmark_all_reduce(
     num_processes: int
 ) -> None:
     mp.spawn(fn=distributed_demo, args=(num_processes, data_size, backend), nprocs=num_processes, join=True)
+
+
+# uv run pytest -k test_DistributedDataParallelIndividualParameters
+class DDPIndividualParameters(nn.Module):
+    def __init__(self, module: nn.Module) -> None:
+        super().__init__()
+        self.module = module
+        for parameter in self.module.parameters():
+            dist.broadcast(parameter.data, 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.module(x)
+
+    def finish_gradient_synchronization(self) -> None:
+        for parameter in self.module.parameters():
+            if parameter.grad is not None:
+                # dist.all_reduce(parameter.grad, dist.ReduceOp.AVG) # RuntimeError: Cannot use ReduceOp.AVG with Gloo
+                dist.all_reduce(parameter.grad)
+                parameter.grad /= dist.get_world_size()
 
 
 if __name__ == '__main__':
