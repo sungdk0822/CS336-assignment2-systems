@@ -1,6 +1,7 @@
 import os
 import timeit
 import torch
+import torch.cuda.nvtx as nvtx
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from cs336_basics.transformer_language_model import TransformerLanguageModel
@@ -125,7 +126,7 @@ def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
     step_range = range(steps)
     if rank == 0: 
         step_range = tqdm(step_range)
-    for step in step_range:
+    for _ in step_range:
         local_input_ids = input_ids[rank * local_batch_size : (rank + 1) * local_batch_size, :].to(device)
         local_label_ids = label_ids[rank * local_batch_size : (rank + 1) * local_batch_size, :].to(device)
         optimizer.zero_grad()
@@ -157,9 +158,9 @@ def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
 
 
 def benchmark_DDP(
-    DDP_class: nn.Module
+    DDP_class: nn.Module,
+    world_size: int = 2
 ) -> None:
-    world_size = 4
     mp.spawn(run_DDP, args=(world_size, DDP_class), nprocs=world_size, join=True)
     '''
     results on 4 x A100 single node (unit: s):
@@ -216,6 +217,41 @@ class DDPMinimalFlat(nn.Module):
             gradient /= self.world_size
 
 
+class DDPOverlapIndividualParameters(nn.Module):
+    def __init__(self, module: nn.Module) -> None:
+        super().__init__()
+        self.module = module
+        self.world_size = dist.get_world_size()
+        for parameter in self.module.parameters():
+            if parameter.requires_grad:
+                parameter.register_post_accumulate_grad_hook(self.all_reduce_hook)
+            dist.broadcast(parameter.data, 0)
+
+    def forward(self, *inputs, **kwargs) -> torch.Tensor:
+        return self.module(*inputs, **kwargs)
+
+    # def all_reduce_hook(self, parameter: torch.Tensor) -> None:
+    #     dist.all_reduce(parameter.grad, async_op=False)
+
+    # def finish_gradient_synchronization(self) -> None:
+    #     for parameter in self.module.parameters():
+    #         if parameter.grad is not None:
+    #             parameter.grad /= self.world_size
+
+    @nvtx.range('all_reduce_hook')
+    def all_reduce_hook(self, parameter: torch.Tensor) -> None:
+        parameter.grad /= self.world_size
+        dist.all_reduce(parameter.grad, async_op=False)
+
+    @nvtx.range('finish_gradient_synchronization')
+    def finish_gradient_synchronization(self) -> None:
+        pass
+
+
 if __name__ == '__main__':
-    # benchmark_DDP(DDPIndividualParameters)
-    benchmark_DDP(DDPMinimalFlat)
+    # benchmark_DDP(DDPIndividualParameters, 4)
+    # benchmark_DDP(DDPMinimalFlat, 4)
+    benchmark_DDP(DDPOverlapIndividualParameters, 4)
+    pass
+
+# uv run nsys profile -o result --force-overwrite true python cs336_systems/distributed_data_parallel.py
