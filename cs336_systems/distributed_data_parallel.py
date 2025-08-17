@@ -117,7 +117,7 @@ def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
     input_ids = torch.randint(0, vocab_size, (batch_size, context_length))
     label_ids = torch.randint(0, vocab_size, (batch_size, context_length))
 
-    steps = 5
+    steps = 50
     communication_time_sum = 0
     torch.cuda.synchronize()
     total_time_start = timeit.default_timer()
@@ -206,7 +206,7 @@ class DDPMinimalFlat(nn.Module):
         dist.all_reduce(flattened_parameters)
         gradients = _unflatten_dense_tensors(flattened_parameters, gradients)
         for gradient in gradients:
-            gradient /= dist.get_world_size()
+            gradient /= self.world_size
 
 
 if __name__ == '__main__':
