@@ -7,6 +7,7 @@ from cs336_basics.transformer_language_model import TransformerLanguageModel
 from cs336_basics.trainer import AdamW, cross_entropy
 from torch import nn
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from tqdm import tqdm
 from typing import Literal
 
 
@@ -68,20 +69,20 @@ def benchmark_all_reduce(
 
 
 def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
-    # d_model = 1600
-    # d_ff = 6400
-    # num_layers = 48
-    # num_heads = 25
-    # context_length = 256
-    # vocab_size = 10000
-    # batch_size = 10
-    d_model = 16
-    d_ff = 64
-    num_layers = 4
-    num_heads = 2
+    d_model = 1600
+    d_ff = 6400
+    num_layers = 48
+    num_heads = 25
     context_length = 256
-    vocab_size = 100
-    batch_size = 10
+    vocab_size = 10000
+    batch_size = 16
+    # d_model = 16
+    # d_ff = 64
+    # num_layers = 4
+    # num_heads = 2
+    # context_length = 256
+    # vocab_size = 100
+    # batch_size = 16
     local_batch_size = batch_size // world_size
     if torch.cuda.is_available() and world_size <= torch.cuda.device_count():
         backend = 'nccl'
@@ -121,7 +122,10 @@ def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
     communication_time_sum = 0
     torch.cuda.synchronize()
     total_time_start = timeit.default_timer()
-    for _ in range(steps):
+    step_range = range(steps)
+    if rank == 0: 
+        step_range = tqdm(step_range)
+    for step in step_range:
         local_input_ids = input_ids[rank * local_batch_size : (rank + 1) * local_batch_size, :].to(device)
         local_label_ids = label_ids[rank * local_batch_size : (rank + 1) * local_batch_size, :].to(device)
         optimizer.zero_grad()
@@ -155,18 +159,21 @@ def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
 def benchmark_DDP(
     DDP_class: nn.Module
 ) -> None:
-    world_size = 2
+    world_size = 4
     mp.spawn(run_DDP, args=(world_size, DDP_class), nprocs=world_size, join=True)
     '''
-    results on 2 x A100 single node (unit: s):
+    results on 4 x A100 single node (unit: s):
         gpu count: 2
         world size: 2
         backend: nccl
         device: cuda
 
         DDPIndividualParameters
-            total time per step: 2.030040
-            communication time per step: 0.687314
+            total time per step: 4.752196
+            communication time per step: 0.967147
+        DDPMinimalFlat
+            total time per step: 4.788055
+            communication time per step: 0.939721
     '''
 
 
@@ -210,5 +217,5 @@ class DDPMinimalFlat(nn.Module):
 
 
 if __name__ == '__main__':
-    benchmark_DDP(DDPIndividualParameters)
+    # benchmark_DDP(DDPIndividualParameters)
     benchmark_DDP(DDPMinimalFlat)
