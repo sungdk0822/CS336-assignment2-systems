@@ -6,6 +6,7 @@ import torch.multiprocessing as mp
 from cs336_basics.transformer_language_model import TransformerLanguageModel
 from cs336_basics.trainer import AdamW, cross_entropy
 from torch import nn
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from typing import Literal
 
 
@@ -66,21 +67,21 @@ def benchmark_all_reduce(
     mp.spawn(fn=distributed_demo, args=(num_processes, data_size, backend), nprocs=num_processes, join=True)
 
 
-def naive_DDP(rank: int, world_size: int) -> None:
-    d_model = 1600
-    d_ff = 6400
-    num_layers = 48
-    num_heads = 25
-    context_length = 256
-    vocab_size = 10000
-    batch_size = 10
-    # d_model = 16
-    # d_ff = 64
-    # num_layers = 4
-    # num_heads = 2
+def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
+    # d_model = 1600
+    # d_ff = 6400
+    # num_layers = 48
+    # num_heads = 25
     # context_length = 256
-    # vocab_size = 100
+    # vocab_size = 10000
     # batch_size = 10
+    d_model = 16
+    d_ff = 64
+    num_layers = 4
+    num_heads = 2
+    context_length = 256
+    vocab_size = 100
+    batch_size = 10
     local_batch_size = batch_size // world_size
     if torch.cuda.is_available() and world_size <= torch.cuda.device_count():
         backend = 'nccl'
@@ -98,9 +99,9 @@ def naive_DDP(rank: int, world_size: int) -> None:
         )
 
     setup(rank, world_size, backend=backend)
-    torch.manual_seed(2025)
+    torch.manual_seed(rank)
 
-    model = DDPIndividualParameters(
+    model = DDP_class(
         TransformerLanguageModel(
                 d_model,
                 num_heads,
@@ -151,19 +152,21 @@ def naive_DDP(rank: int, world_size: int) -> None:
     dist.destroy_process_group()
 
 
-def benchmark_naive_DDP(
-
+def benchmark_DDP(
+    DDP_class: nn.Module
 ) -> None:
     world_size = 2
-    mp.spawn(naive_DDP, args=(world_size,), nprocs=world_size, join=True)
+    mp.spawn(run_DDP, args=(world_size, DDP_class), nprocs=world_size, join=True)
     '''
     results on 2 x A100 single node (unit: s):
         gpu count: 2
         world size: 2
         backend: nccl
-        device: cuda:0
-        total time per step: 2.030040
-        communication time per step: 0.687314
+        device: cuda
+
+        DDPIndividualParameters
+            total time per step: 2.030040
+            communication time per step: 0.687314
     '''
 
 
@@ -186,5 +189,26 @@ class DDPIndividualParameters(nn.Module):
                 parameter.grad /= dist.get_world_size()
 
 
+class DDPMinimalFlat(nn.Module):
+    def __init__(self, module: nn.Module) -> None:
+        super().__init__()
+        self.module = module
+        self.world_size = dist.get_world_size()
+        for parameter in self.module.parameters():
+            dist.broadcast(parameter.data, 0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.module(x)
+
+    def finish_gradient_synchronization(self) -> None:
+        gradients = [p.grad for p in self.module.parameters() if p.grad is not None]
+        flattened_parameters = _flatten_dense_tensors(gradients)
+        dist.all_reduce(flattened_parameters)
+        gradients = _unflatten_dense_tensors(flattened_parameters, gradients)
+        for gradient in gradients:
+            gradient /= dist.get_world_size()
+
+
 if __name__ == '__main__':
-    benchmark_naive_DDP()
+    benchmark_DDP(DDPIndividualParameters)
+    benchmark_DDP(DDPMinimalFlat)
