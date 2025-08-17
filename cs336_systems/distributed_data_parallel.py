@@ -67,20 +67,20 @@ def benchmark_all_reduce(
 
 
 def naive_DDP(rank: int, world_size: int) -> None:
-    # d_model = 1600
-    # d_ff = 6400
-    # num_layers = 48
-    # num_heads = 25
-    # context_length = 256
-    # vocab_size = 10000
-    # batch_size = 100
-    d_model = 16
-    d_ff = 64
-    num_layers = 4
-    num_heads = 2
+    d_model = 1600
+    d_ff = 6400
+    num_layers = 48
+    num_heads = 25
     context_length = 256
-    vocab_size = 100
+    vocab_size = 10000
     batch_size = 10
+    # d_model = 16
+    # d_ff = 64
+    # num_layers = 4
+    # num_heads = 2
+    # context_length = 256
+    # vocab_size = 100
+    # batch_size = 10
     local_batch_size = batch_size // world_size
     if torch.cuda.is_available() and world_size <= torch.cuda.device_count():
         backend = 'nccl'
@@ -116,7 +116,7 @@ def naive_DDP(rank: int, world_size: int) -> None:
     input_ids = torch.randint(0, vocab_size, (batch_size, context_length))
     label_ids = torch.randint(0, vocab_size, (batch_size, context_length))
 
-    steps = 50
+    steps = 5
     communication_time_sum = 0
     torch.cuda.synchronize()
     total_time_start = timeit.default_timer()
@@ -148,12 +148,23 @@ def naive_DDP(rank: int, world_size: int) -> None:
         print(f'total time per step: {total_time_per_step:6f}')
         print(f'communication time per step: {communication_time_per_step:6f}')
 
+    dist.destroy_process_group()
+
 
 def benchmark_naive_DDP(
 
 ) -> None:
     world_size = 2
     mp.spawn(naive_DDP, args=(world_size,), nprocs=world_size, join=True)
+    '''
+    results on 2 x A100 single node (unit: s):
+        gpu count: 2
+        world size: 2
+        backend: nccl
+        device: cuda:0
+        total time per step: 2.030040
+        communication time per step: 0.687314
+    '''
 
 
 # uv run pytest -k test_DistributedDataParallelIndividualParameters
