@@ -265,6 +265,7 @@ class DDPOverlapIndividualParameters(nn.Module):
         pass
 
 
+# uv run pytest tests/test_ddp.py
 class DDPOverlapBucketed(nn.Module):
     def __init__(self, module: nn.Module, bucket_size_mb: float) -> None:
         super().__init__()
@@ -316,22 +317,13 @@ class DDPOverlapBucketed(nn.Module):
 
 
 if __name__ == '__main__':
-    from tests.common import ToyModel, ToyModelWithTiedWeights
-    # benchmark_DDP(DDPIndividualParameters, 2)
-    # benchmark_DDP(DDPMinimalFlat, 2)
-    # benchmark_DDP(DDPOverlapIndividualParameters, 2)
+    benchmark_DDP(DDPIndividualParameters, 2)
+    benchmark_DDP(DDPMinimalFlat, 2)
+    benchmark_DDP(DDPOverlapIndividualParameters, 2)
 
-    # benchmark_DDP(DDPOverlapBucketed, 2, 1.0)
-    # benchmark_DDP(DDPOverlapBucketed, 2, 10.0)
-    # benchmark_DDP(DDPOverlapBucketed, 2, 100.0)
-    # benchmark_DDP(DDPOverlapBucketed, 2, 1000.0)
-
-    bucket_size_mb = 0.01
-    setup(0, 1, backend='gloo')
-    model = DDPOverlapBucketed(
-        ToyModel(),
-        bucket_size_mb
-    )
-    pass
+    benchmark_DDP(DDPOverlapBucketed, 2, 1.0)
+    benchmark_DDP(DDPOverlapBucketed, 2, 10.0)
+    benchmark_DDP(DDPOverlapBucketed, 2, 100.0)
+    benchmark_DDP(DDPOverlapBucketed, 2, 1000.0)
 
 # uv run nsys profile -o result --force-overwrite true python cs336_systems/distributed_data_parallel.py
