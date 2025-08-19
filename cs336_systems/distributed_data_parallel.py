@@ -69,7 +69,7 @@ def benchmark_all_reduce(
     mp.spawn(fn=distributed_demo, args=(num_processes, data_size, backend), nprocs=num_processes, join=True)
 
 
-def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
+def run_DDP(rank: int, world_size: int, DDP_class: nn.Module, bucket_size_mb: float | None = None) -> None:
     d_model = 1600
     d_ff = 6400
     num_layers = 48
@@ -103,18 +103,34 @@ def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
     setup(rank, world_size, backend=backend)
     torch.manual_seed(rank)
 
-    model = DDP_class(
-        TransformerLanguageModel(
-                d_model,
-                num_heads,
-                d_ff,
-                10000.0,
-                vocab_size,
-                context_length,
-                num_layers,
-                device,
-            )
-    )
+    if bucket_size_mb is None:
+        model = DDP_class(
+            TransformerLanguageModel(
+                    d_model,
+                    num_heads,
+                    d_ff,
+                    10000.0,
+                    vocab_size,
+                    context_length,
+                    num_layers,
+                    device,
+                )
+        )
+    else:
+        model = DDP_class(
+            TransformerLanguageModel(
+                    d_model,
+                    num_heads,
+                    d_ff,
+                    10000.0,
+                    vocab_size,
+                    context_length,
+                    num_layers,
+                    device,
+                ),
+            bucket_size_mb
+        )
+
     optimizer = AdamW(model.parameters())
     input_ids = torch.randint(0, vocab_size, (batch_size, context_length))
     label_ids = torch.randint(0, vocab_size, (batch_size, context_length))
@@ -159,9 +175,10 @@ def run_DDP(rank: int, world_size: int, DDP_class: nn.Module) -> None:
 
 def benchmark_DDP(
     DDP_class: nn.Module,
-    world_size: int = 2
+    world_size: int = 2,
+    bucket_size_mb: float | None = None
 ) -> None:
-    mp.spawn(run_DDP, args=(world_size, DDP_class), nprocs=world_size, join=True)
+    mp.spawn(run_DDP, args=(world_size, DDP_class, bucket_size_mb), nprocs=world_size, join=True)
     '''
     results on 4 x A100 single node (unit: s):
         gpu count: 2
@@ -210,9 +227,9 @@ class DDPMinimalFlat(nn.Module):
 
     def finish_gradient_synchronization(self) -> None:
         gradients = [p.grad for p in self.module.parameters() if p.grad is not None]
-        flattened_parameters = _flatten_dense_tensors(gradients)
-        dist.all_reduce(flattened_parameters)
-        gradients = _unflatten_dense_tensors(flattened_parameters, gradients)
+        flattened_gradients = _flatten_dense_tensors(gradients)
+        dist.all_reduce(flattened_gradients)
+        gradients = _unflatten_dense_tensors(flattened_gradients, gradients)
         for gradient in gradients:
             gradient /= self.world_size
 
@@ -248,10 +265,71 @@ class DDPOverlapIndividualParameters(nn.Module):
         pass
 
 
+class DDPOverlapBucketed(nn.Module):
+    def __init__(self, module: nn.Module, bucket_size_mb: float) -> None:
+        super().__init__()
+        self.module = module
+        self.bucket_size_mb = bucket_size_mb
+        self.world_size = dist.get_world_size()
+        self.buckets = {}
+
+        current_bucket = []
+        current_bucket_filled_mb = 0.0
+        for parameter in reversed(list(self.module.parameters())):
+            dist.broadcast(parameter.data, 0)
+            if parameter.requires_grad:
+                parameter.register_post_accumulate_grad_hook(self.all_reduce_hook)
+                gradient_mb = parameter.numel() * parameter.element_size() / 1024 / 1024
+                if (current_bucket_filled_mb + gradient_mb <= self.bucket_size_mb) or len(current_bucket) == 0: # fill the current bucket
+                    current_bucket.append(parameter)
+                    current_bucket_filled_mb += gradient_mb
+                else: # start filling a new empty bucket
+                    self.buckets[tuple(current_bucket)] = len(current_bucket)
+                    current_bucket = []
+                    current_bucket.append(parameter)
+                    current_bucket_filled_mb = gradient_mb
+        if len(current_bucket) > 0:
+            self.buckets[tuple(current_bucket)] = len(current_bucket)
+
+    def forward(self, *inputs, **kwargs) -> torch.Tensor:
+        return self.module(*inputs, **kwargs)
+
+    @nvtx.range('all_reduce_hook')
+    def all_reduce_hook(self, parameter: torch.Tensor) -> None:
+        parameter.grad /= self.world_size
+        for bucket in self.buckets:
+            for p in bucket:
+                if torch.equal(p, parameter):
+                    self.buckets[bucket] -= 1
+                    if self.buckets[bucket] == 0:
+                        gradients = [p.grad for p in bucket]
+                        flattened_gradients = _flatten_dense_tensors(gradients)
+                        dist.all_reduce(flattened_gradients, async_op=False)
+                        gradients = _unflatten_dense_tensors(flattened_gradients, gradients)
+                        self.buckets[bucket] = len(bucket)
+
+    @nvtx.range('finish_gradient_synchronization')
+    def finish_gradient_synchronization(self) -> None:
+        pass
+
+
 if __name__ == '__main__':
-    # benchmark_DDP(DDPIndividualParameters, 4)
-    # benchmark_DDP(DDPMinimalFlat, 4)
-    benchmark_DDP(DDPOverlapIndividualParameters, 4)
+    from tests.common import ToyModel, ToyModelWithTiedWeights
+    # benchmark_DDP(DDPIndividualParameters, 2)
+    # benchmark_DDP(DDPMinimalFlat, 2)
+    # benchmark_DDP(DDPOverlapIndividualParameters, 2)
+
+    # benchmark_DDP(DDPOverlapBucketed, 2, 1.0)
+    # benchmark_DDP(DDPOverlapBucketed, 2, 10.0)
+    # benchmark_DDP(DDPOverlapBucketed, 2, 100.0)
+    # benchmark_DDP(DDPOverlapBucketed, 2, 1000.0)
+
+    bucket_size_mb = 0.01
+    setup(0, 1, backend='gloo')
+    model = DDPOverlapBucketed(
+        ToyModel(),
+        bucket_size_mb
+    )
     pass
 
 # uv run nsys profile -o result --force-overwrite true python cs336_systems/distributed_data_parallel.py
