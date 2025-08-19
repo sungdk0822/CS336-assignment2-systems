@@ -299,13 +299,15 @@ class DDPOverlapBucketed(nn.Module):
         parameter.grad /= self.world_size
         for bucket in self.buckets:
             for p in bucket:
-                if torch.equal(p, parameter):
+                if p is parameter:
                     self.buckets[bucket] -= 1
                     if self.buckets[bucket] == 0:
                         gradients = [p.grad for p in bucket]
                         flattened_gradients = _flatten_dense_tensors(gradients)
                         dist.all_reduce(flattened_gradients, async_op=False)
-                        gradients = _unflatten_dense_tensors(flattened_gradients, gradients)
+                        reduced_gradients = _unflatten_dense_tensors(flattened_gradients, gradients)
+                        for reduced_gradient, p in zip(reduced_gradients, bucket):
+                            p.grad = reduced_gradient
                         self.buckets[bucket] = len(bucket)
 
     @nvtx.range('finish_gradient_synchronization')
