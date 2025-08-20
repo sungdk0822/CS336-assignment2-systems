@@ -76,20 +76,20 @@ class ShardedOptimizer(Optimizer):
 
 
 def run_OSS(rank: int, world_size: int, optimizer_cls: Optimizer, use_OSS: bool = True) -> None:
-    # d_model = 1600
-    # d_ff = 6400
-    # num_layers = 48
-    # num_heads = 25
-    # context_length = 256
-    # vocab_size = 10000
-    # batch_size = 16
-    d_model = 16
-    d_ff = 64
-    num_layers = 4
-    num_heads = 2
+    d_model = 1600
+    d_ff = 6400
+    num_layers = 48
+    num_heads = 25
     context_length = 256
-    vocab_size = 100
+    vocab_size = 10000
     batch_size = 16
+    # d_model = 16
+    # d_ff = 64
+    # num_layers = 4
+    # num_heads = 2
+    # context_length = 256
+    # vocab_size = 100
+    # batch_size = 16
     if torch.cuda.is_available() and world_size <= torch.cuda.device_count():
         backend = 'nccl'
         device = f'cuda:{rank}'
@@ -119,8 +119,8 @@ def run_OSS(rank: int, world_size: int, optimizer_cls: Optimizer, use_OSS: bool 
                 device,
             )
 
-    if 'cuda' in device:
-        print(f'max allocated(after model init): {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB')
+    if 'cuda' in device and rank == 0:
+        print(f'max allocated(after model init): {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB')
         torch.cuda.reset_peak_memory_stats()
 
     if use_OSS:
@@ -128,34 +128,38 @@ def run_OSS(rank: int, world_size: int, optimizer_cls: Optimizer, use_OSS: bool 
     else:
         optimizer = optimizer_cls(model.parameters())
         
-    if 'cuda' in device:
-        print(f'max allocated(after optimizer init): {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB')
+    if 'cuda' in device and rank == 0:
+        print(f'max allocated(after optimizer init): {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB')
         torch.cuda.reset_peak_memory_stats()
 
     input_ids = torch.randint(0, vocab_size, (batch_size, context_length))
     label_ids = torch.randint(0, vocab_size, (batch_size, context_length))
 
     steps = 50
+    optimizer_step_time_sum = 0
     torch.cuda.synchronize()
     total_time_start = timeit.default_timer()
     step_range = range(steps)
     if rank == 0: 
         step_range = tqdm(step_range)
-    for _ in step_range:
+    for step in step_range:
         optimizer.zero_grad()
         lm_head_output = model(input_ids)
         loss = cross_entropy(lm_head_output, label_ids)
         loss.backward()
 
-    if 'cuda' in device:
-        print(f'max allocated(before optimizer.step): {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB')
-        torch.cuda.reset_peak_memory_stats()
+        if ('cuda' in device and rank == 0) and step % 10 == 0:
+            print(f'max allocated(step {step}, before optimizer.step): {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB')
+            torch.cuda.reset_peak_memory_stats()
 
+        optimizer_step_time_start = timeit.default_timer()
         optimizer.step()
+        optimizer_step_time_end = timeit.default_timer()
+        optimizer_step_time_sum += (optimizer_step_time_end - optimizer_step_time_start)
 
-    if 'cuda' in device:
-        print(f'max allocated(after optimizer.step): {torch.cuda.max_memory_allocated() / 1024 ** 2:.2f} MB')
-        torch.cuda.reset_peak_memory_stats()
+        if ('cuda' in device and rank == 0) and step % 10 == 0:
+            print(f'max allocated(step {step}, after optimizer.step): {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB')
+            torch.cuda.reset_peak_memory_stats()
 
         permutation = torch.randperm(batch_size)
         input_ids = input_ids[permutation]
@@ -163,9 +167,11 @@ def run_OSS(rank: int, world_size: int, optimizer_cls: Optimizer, use_OSS: bool 
     torch.cuda.synchronize()
     total_time_end = timeit.default_timer()
     total_time_per_step = (total_time_end - total_time_start) / steps
+    optimizer_step_time_per_step = optimizer_step_time_sum / steps
     
     if rank == 0:
         print(f'total time per step: {total_time_per_step:6f}')
+        print(f'optimizer.step() time per step: {optimizer_step_time_per_step:6f}')
 
     dist.destroy_process_group()
 
