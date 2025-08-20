@@ -1,6 +1,6 @@
+import torch
 import torch.distributed as dist
-from torch.optim import Optimizer, AdamW
-from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from torch.optim import Optimizer
 from typing import Any
 
 
@@ -19,10 +19,9 @@ class ShardedOptimizer(Optimizer):
         self.world_size = dist.get_world_size()
         self.rank = dist.get_rank()
         self.params = []
+        self.assigned_params_per_rank = []
         super().__init__(params, kwargs)
         self.optimizer = optimizer_cls(self.params, **kwargs)
-        print(len(self.params))
-        print(len(self.optimizer.param_groups[-1]['params']))
 
     def step(self, closure = None, **kwargs):
         '''
@@ -31,11 +30,10 @@ class ShardedOptimizer(Optimizer):
         ranks.
         '''
         self.optimizer.step(closure, **kwargs)
-        print('34')
-        for param in self.params:
-            dist.broadcast(param, self.rank)
-            print('37')
-        print('38')
+        with torch.no_grad():
+            for rank in range(self.world_size):
+                for param in self.assigned_params_per_rank[rank]:
+                    dist.broadcast(param.data, rank)
 
     def add_param_group(self, param_group: dict[str, Any]): 
         '''
@@ -64,4 +62,8 @@ class ShardedOptimizer(Optimizer):
             assigned_bytes_per_rank[i] = (rank, assigned_bytes + param.nbytes)
             assigned_params_per_rank[rank].append(param)
             i = (i + 1) % self.world_size
+        self.assigned_params_per_rank = assigned_params_per_rank
         self.params = assigned_params_per_rank[self.rank]
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        self.optimizer.zero_grad(set_to_none)
