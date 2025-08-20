@@ -5,7 +5,7 @@ import torch.multiprocessing as mp
 from cs336_basics.transformer_language_model import TransformerLanguageModel
 from cs336_basics.trainer import cross_entropy
 from cs336_systems.distributed_data_parallel import setup
-from torch.optim import Optimizer, AdamW
+from torch.optim import Optimizer, SGD, AdamW
 from tqdm import tqdm
 from typing import Any
 
@@ -82,14 +82,14 @@ def run_OSS(rank: int, world_size: int, optimizer_cls: Optimizer, use_OSS: bool 
     num_heads = 25
     context_length = 256
     vocab_size = 10000
-    batch_size = 16
+    batch_size = 1
     # d_model = 16
     # d_ff = 64
     # num_layers = 4
     # num_heads = 2
     # context_length = 256
     # vocab_size = 100
-    # batch_size = 16
+    # batch_size = 1
     if torch.cuda.is_available() and world_size <= torch.cuda.device_count():
         backend = 'nccl'
         device = f'cuda:{rank}'
@@ -185,6 +185,8 @@ def benchmark_OSS(
 
 
 if __name__ == '__main__':
+    benchmark_OSS(SGD, 2, True)
+    benchmark_OSS(SGD, 2, False)
     benchmark_OSS(AdamW, 2, True)
     benchmark_OSS(AdamW, 2, False)
     pass
