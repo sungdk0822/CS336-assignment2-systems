@@ -152,8 +152,10 @@ def run_OSS(rank: int, world_size: int, optimizer_cls: Optimizer, use_OSS: bool 
             print(f'max allocated(step {step}, before optimizer.step): {torch.cuda.max_memory_allocated() / 1024 ** 3:.2f} GB')
             torch.cuda.reset_peak_memory_stats()
 
+        torch.cuda.synchronize()
         optimizer_step_time_start = timeit.default_timer()
         optimizer.step()
+        torch.cuda.synchronize()
         optimizer_step_time_end = timeit.default_timer()
         optimizer_step_time_sum += (optimizer_step_time_end - optimizer_step_time_start)
 
